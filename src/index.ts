@@ -1,13 +1,9 @@
 import "dotenv/config";
 import express from "express";
-import { Pool } from "pg";
+import { pool } from "./db.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
 
 app.use(express.json());
 
@@ -20,9 +16,9 @@ app.get("/health", async (_req, res) => {
       database: "connected",
     });
   } catch (error) {
-  console.error("Database connection failed:", error);
+    console.error("Database connection failed:", error);
 
-  res.status(503).json({
+    res.status(503).json({
       status: "error",
       database: "unavailable",
     });
