@@ -3,6 +3,7 @@ import express from "express";
 import { pool } from "./db.js";
 import { generateApiKey, hashApiKey } from "./utils/apiKey.js";
 import { authenticateAccount } from "./middleware/authenticateAccount.js";
+import { consumeUsage } from "./services/usageService.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
@@ -226,6 +227,84 @@ app.post(
 
       res.status(500).json({
         error: "Failed to create user",
+      });
+    }
+  },
+);
+
+
+app.post(
+  "/accounts/:accountId/usage",
+  authenticateAccount,
+  async (req, res) => {
+    const accountId = req.params.accountId;
+
+if (typeof accountId !== "string") {
+  res.status(400).json({
+    error: "Invalid account ID",
+  });
+  return;
+}
+    const { externalUserId, requestId, units } = req.body;
+
+    if (
+      typeof externalUserId !== "string" ||
+      externalUserId.trim().length === 0 ||
+      typeof requestId !== "string" ||
+      requestId.trim().length === 0 ||
+      !Number.isSafeInteger(units) ||
+      units <= 0
+    ) {
+      res.status(400).json({
+        error: "External user ID, request ID, and positive integer units are required",
+      });
+      return;
+    }
+
+    try {
+      const result = await consumeUsage({
+        accountId,
+        externalUserId,
+        requestId,
+        units,
+      });
+
+      if (result.status === "rejected") {
+        const status =
+          result.reason === "User or user plan not found" ||
+          result.reason === "Account or account plan not found"
+            ? 404
+            : result.reason === "Request ID already used with different data"
+              ? 409
+              : result.reason === "Invalid usage input"
+                ? 400
+                : 429;
+
+        res.status(status).json({
+          error: result.reason,
+        });
+        return;
+      }
+
+      if (result.status === "duplicate") {
+        res.status(200).json({
+          message: "Request was already recorded",
+          duplicate: true,
+          usage: result.usage,
+        });
+        return;
+      }
+
+      res.status(201).json({
+        message: "Usage recorded successfully",
+        duplicate: false,
+        usage: result.usage,
+      });
+    } catch (error) {
+      console.error("Failed to record usage:", error);
+
+      res.status(500).json({
+        error: "Failed to record usage",
       });
     }
   },
