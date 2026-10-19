@@ -11,6 +11,7 @@ const port = Number(process.env.PORT ?? 3000);
 
 app.use(express.json());
 
+
 app.post("/accounts", async (req, res) => {
   const { name } = req.body;
 
@@ -23,27 +24,93 @@ app.post("/accounts", async (req, res) => {
 
   const apiKey = generateApiKey();
   const apiKeyHash = hashApiKey(apiKey);
+  const client = await pool.connect();
 
   try {
-    const result = await pool.query(
+    await client.query("BEGIN");
+
+    const result = await client.query(
       `INSERT INTO accounts (name, api_key_hash)
        VALUES ($1, $2)
        RETURNING id, name, created_at`,
       [name.trim(), apiKeyHash],
     );
 
+    const account = result.rows[0];
+
+    const plans = [
+      {
+        scope: "account",
+        name: "Starter",
+        monthlyLimit: 100000,
+        maxRequestUnits: 1000,
+      },
+      {
+        scope: "account",
+        name: "Pro",
+        monthlyLimit: 200000,
+        maxRequestUnits: 2000,
+      },
+      {
+        scope: "user",
+        name: "Basic User",
+        monthlyLimit: 5000,
+        maxRequestUnits: 100,
+      },
+      {
+        scope: "user",
+        name: "Premium User",
+        monthlyLimit: 20000,
+        maxRequestUnits: 500,
+      },
+    ];
+
+    let starterPlanId = "";
+
+    for (const plan of plans) {
+      const planResult = await client.query(
+        `INSERT INTO plans
+          (owner_account_id, scope, name, monthly_limit, max_request_units)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id`,
+        [
+          account.id,
+          plan.scope,
+          plan.name,
+          plan.monthlyLimit,
+          plan.maxRequestUnits,
+        ],
+      );
+
+      if (plan.name === "Starter") {
+        starterPlanId = planResult.rows[0].id;
+      }
+    }
+
+    await client.query(
+      `INSERT INTO account_plan_assignments (account_id, plan_id)
+       VALUES ($1, $2)`,
+      [account.id, starterPlanId],
+    );
+
+    await client.query("COMMIT");
+
     res.status(201).json({
-      account: result.rows[0],
+      account,
       apiKey,
     });
   } catch (error) {
+    await client.query("ROLLBACK");
     console.error("Failed to create account:", error);
 
     res.status(500).json({
       error: "Failed to create account",
     });
+  } finally {
+    client.release();
   }
 });
+
 
 app.post(
   "/accounts/:accountId/plans",

@@ -9,11 +9,23 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U usage_app -d usage_meter"]
       interval: 5s
       timeout: 5s
       retries: 10
+
+  api:
+    build: .
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://usage_app:local_dev_password@db:5432/usage_meter
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   postgres_data:
