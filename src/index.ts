@@ -4,6 +4,7 @@ import { pool } from "./db.js";
 import { generateApiKey, hashApiKey } from "./utils/apiKey.js";
 import { authenticateAccount } from "./middleware/authenticateAccount.js";
 import { consumeUsage } from "./services/usageService.js";
+import { getAccountUsageSummary } from "./services/usageSummaryService.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
@@ -305,6 +306,43 @@ if (typeof accountId !== "string") {
 
       res.status(500).json({
         error: "Failed to record usage",
+      });
+    }
+  },
+);
+
+
+app.get(
+  "/accounts/:accountId/usage/summary",
+  authenticateAccount,
+  async (req, res) => {
+    const accountId = req.params.accountId;
+
+    if (typeof accountId !== "string") {
+      res.status(400).json({
+        error: "Invalid account ID",
+      });
+      return;
+    }
+
+    try {
+      const summary = await getAccountUsageSummary(accountId);
+
+      if (!summary) {
+        res.status(404).json({
+          error: "Account plan not found",
+        });
+        return;
+      }
+
+      res.status(200).json({
+        summary,
+      });
+    } catch (error) {
+      console.error("Failed to get usage summary:", error);
+
+      res.status(500).json({
+        error: "Failed to get usage summary",
       });
     }
   },
