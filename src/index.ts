@@ -7,7 +7,6 @@ import { consumeUsage } from "./services/usageService.js";
 import { getAccountUsageSummary } from "./services/usageSummaryService.js";
 
 const app = express();
-const port = Number(process.env.PORT ?? 3000);
 
 app.use(express.json());
 
@@ -434,6 +433,4 @@ app.get("/health", async (_req, res) => {
   }
 });
 
-app.listen(port, () => {
-  console.log(`Usage Meter API listening on port ${port}`);
-});
+export { app };

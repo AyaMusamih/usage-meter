@@ -1,12 +1,14 @@
-const BASE_URL = "http://172.18.64.1:3000";
-const ACCOUNT_ID = "c47ba110-9e84-4055-a821-eccb85f74838";
+const BASE_URL = process.env.USAGE_METER_BASE_URL ?? "http://172.18.64.1:3000";
+const ACCOUNT_ID = process.env.USAGE_METER_ACCOUNT_ID;
 const USER_ID = "student-001";
 
 async function main() {
   const apiKey = process.env.USAGE_METER_API_KEY;
 
-  if (!apiKey) {
-    console.error("Please set the USAGE_METER_API_KEY environment variable.");
+  if (!apiKey || !ACCOUNT_ID) {
+    console.error(
+      "Please set both USAGE_METER_API_KEY and USAGE_METER_ACCOUNT_ID.",
+    );
     process.exitCode = 1;
     return;
   }
@@ -14,21 +16,18 @@ async function main() {
   const requestId = `demo-${Date.now()}`;
 
   async function recordUsage(id, units) {
-    const response = await fetch(
-      `${BASE_URL}/accounts/${ACCOUNT_ID}/usage`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-        },
-        body: JSON.stringify({
-          externalUserId: USER_ID,
-          requestId: id,
-          units,
-        }),
+    const response = await fetch(`${BASE_URL}/accounts/${ACCOUNT_ID}/usage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
       },
-    );
+      body: JSON.stringify({
+        externalUserId: USER_ID,
+        requestId: id,
+        units,
+      }),
+    });
 
     const body = await response.json();
 

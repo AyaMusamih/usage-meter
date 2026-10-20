@@ -149,12 +149,46 @@ The response reports the current UTC month, accepted usage, monthly limit, remai
 - Per-request unit limits are enforced.
 - Usage events are stored in PostgreSQL.
 
+## Testing
+
+Run the automated test suite:
+
+```bash
+npm test
+```
+
+The suite includes API validation tests, authentication tests, usage input validation tests, and a PostgreSQL integration test covering usage recording, duplicate request handling, and monthly limit enforcement.
+
+The integration test uses a separate `usage_meter_test` database. Ensure that this database exists and has been initialized with `db/schema.sql` before running the integration tests.
+
+## Performance Testing
+
+Build the application and run the sequential performance test:
+
+```bash
+npm run build
+node scripts/performance.mjs
+```
+
+The test uses the `usage_meter_test` database by default and sends 1,000 sequential usage requests. You can change the request count using `PERF_REQUESTS`, for example:
+
+```bash
+PERF_REQUESTS=500 node scripts/performance.mjs
+```
+
+The script reports successful and failed requests, throughput, average latency, and P95 latency.
+
+The initial local run processed 1,000 requests with 100% success, 188.29 requests/second, 5.31 ms average latency, and 7.85 ms P95 latency. These are baseline results from a sequential local test, not a production capacity guarantee.
+
+Detailed results are documented in [`docs/performance-results.md`](docs/performance-results.md).
+
 ## Limitations
 
 - Dedicated endpoints for listing and updating plans are not implemented.
 - Changing an existing user's plan through a dedicated endpoint is not implemented.
 - Historical usage reports, request outcome history, and pagination are not implemented.
-- Automated tests, an example client, and reproducible performance tests are not included yet.
+- Performance testing currently covers sequential requests; concurrent-load and sustained-load testing remain to be done.
+- The example client is available through the optional Docker Compose `demo` profile. It requires a valid account ID, API key, and an existing user configured for the demo.
 
 ## Technology
 

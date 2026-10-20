@@ -1,4 +1,3 @@
-
 import { pool } from "../db.js";
 
 export interface ConsumeUsageInput {
@@ -18,6 +17,17 @@ export interface ConsumeUsageResult {
   };
 }
 
+export function isValidUsageInput(input: ConsumeUsageInput): boolean {
+  return (
+    typeof input.externalUserId === "string" &&
+    input.externalUserId.trim().length > 0 &&
+    typeof input.requestId === "string" &&
+    input.requestId.trim().length > 0 &&
+    Number.isSafeInteger(input.units) &&
+    input.units > 0
+  );
+}
+
 export async function consumeUsage(
   input: ConsumeUsageInput,
 ): Promise<ConsumeUsageResult> {
@@ -28,14 +38,7 @@ export async function consumeUsage(
     await client.query("BEGIN");
     transactionStarted = true;
 
-    if (
-      typeof input.externalUserId !== "string" ||
-      input.externalUserId.trim().length === 0 ||
-      typeof input.requestId !== "string" ||
-      input.requestId.trim().length === 0 ||
-      !Number.isSafeInteger(input.units) ||
-      input.units <= 0
-    ) {
+    if (!isValidUsageInput(input)) {
       await client.query("ROLLBACK");
       transactionStarted = false;
       return { status: "rejected", reason: "Invalid usage input" };
@@ -184,12 +187,7 @@ export async function consumeUsage(
        )
        VALUES ($1, $2, $3, $4)
        RETURNING request_id, units::text AS units, created_at`,
-      [
-        input.accountId,
-        user.id,
-        input.requestId.trim(),
-        input.units,
-      ],
+      [input.accountId, user.id, input.requestId.trim(), input.units],
     );
 
     await client.query("COMMIT");
