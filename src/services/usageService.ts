@@ -7,15 +7,28 @@ export interface ConsumeUsageInput {
   units: number;
 }
 
-export interface ConsumeUsageResult {
-  status: "recorded" | "duplicate" | "rejected";
-  reason?: string;
-  usage?: {
-    requestId: string;
-    units: string;
-    createdAt: Date;
-  };
+export interface Rejection {
+  level: "account" | "user";
+  rule: "max_units_per_request" | "monthly_allowance";
+  limit: number;
 }
+
+export interface Decision {
+  accepted: boolean;
+  requestId: string;
+  units: number;
+  rejection?: Rejection;
+  remaining: { account: number; user: number };
+  createdAt: Date;
+}
+
+export type ConsumeUsageResult =
+  | { status: "decided"; duplicate: boolean; decision: Decision }
+  | {
+      status: "error";
+      code: "invalid_input" | "not_found" | "conflict";
+      message: string;
+    };
 
 export function isValidUsageInput(input: ConsumeUsageInput): boolean {
   return (
@@ -28,25 +41,68 @@ export function isValidUsageInput(input: ConsumeUsageInput): boolean {
   );
 }
 
+const LOG_COLUMNS = `request_id, units::text AS units, accepted,
+  rejection_level, rejection_rule, rejection_limit::text AS rejection_limit,
+  account_remaining::text AS account_remaining,
+  user_remaining::text AS user_remaining, created_at`;
+
+function toDecision(row: any): Decision {
+  return {
+    accepted: row.accepted,
+    requestId: row.request_id,
+    units: Number(row.units),
+    ...(row.accepted
+      ? {}
+      : {
+          rejection: {
+            level: row.rejection_level,
+            rule: row.rejection_rule,
+            limit: Number(row.rejection_limit),
+          },
+        }),
+    remaining: {
+      account: Number(row.account_remaining),
+      user: Number(row.user_remaining),
+    },
+    createdAt: row.created_at,
+  };
+}
+
+function remaining(limit: bigint, used: bigint): number {
+  return Number(limit > used ? limit - used : 0n);
+}
+
 export async function consumeUsage(
   input: ConsumeUsageInput,
 ): Promise<ConsumeUsageResult> {
+  if (!isValidUsageInput(input)) {
+    return {
+      status: "error",
+      code: "invalid_input",
+      message: "Invalid usage input",
+    };
+  }
+
+  const externalUserId = input.externalUserId.trim();
+  const requestId = input.requestId.trim();
+  const requested = BigInt(input.units);
+
   const client = await pool.connect();
-  let transactionStarted = false;
+
+  const abort = async (
+    code: "not_found" | "conflict",
+    message: string,
+  ): Promise<ConsumeUsageResult> => {
+    await client.query("ROLLBACK");
+    return { status: "error", code, message };
+  };
 
   try {
     await client.query("BEGIN");
-    transactionStarted = true;
 
-    if (!isValidUsageInput(input)) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
-      return { status: "rejected", reason: "Invalid usage input" };
-    }
-
-    // Lock the account to serialize usage requests for this account.
+    // Lock the account row: requests for one account are processed one at a time.
     const accountResult = await client.query(
-      `SELECT a.id, p.monthly_limit, p.max_request_units
+      `SELECT p.monthly_limit, p.max_request_units
        FROM accounts a
        JOIN account_plan_assignments apa ON apa.account_id = a.id
        JOIN plans p ON p.id = apa.plan_id
@@ -56,15 +112,9 @@ export async function consumeUsage(
     );
 
     if (accountResult.rowCount === 0) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
-      return {
-        status: "rejected",
-        reason: "Account or account plan not found",
-      };
+      return await abort("not_found", "Account or account plan not found");
     }
 
-    // Find the user and their plan within this account.
     const userResult = await client.query(
       `SELECT u.id, p.monthly_limit, p.max_request_units
        FROM users u
@@ -74,82 +124,49 @@ export async function consumeUsage(
          AND p.scope = 'user'
          AND p.owner_account_id = u.account_id
        FOR UPDATE OF u`,
-      [input.accountId, input.externalUserId.trim()],
+      [input.accountId, externalUserId],
     );
 
     if (userResult.rowCount === 0) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
-      return { status: "rejected", reason: "User or user plan not found" };
+      return await abort("not_found", "User or user plan not found");
     }
 
     const account = accountResult.rows[0];
     const user = userResult.rows[0];
-    const requestedUnits = BigInt(input.units);
 
-    // Check whether this request was already recorded.
-    const existingResult = await client.query(
-      `SELECT user_id, request_id, units::text AS units, created_at
-       FROM usage_events
+    // Retry of a request we already decided: return the stored decision.
+    const existing = await client.query(
+      `SELECT user_id, ${LOG_COLUMNS}
+       FROM request_log
        WHERE account_id = $1 AND request_id = $2`,
-      [input.accountId, input.requestId.trim()],
+      [input.accountId, requestId],
     );
 
-    if (existingResult.rowCount && existingResult.rowCount > 0) {
-      const existing = existingResult.rows[0];
+    if (existing.rowCount && existing.rowCount > 0) {
+      const row = existing.rows[0];
 
-      await client.query("ROLLBACK");
-      transactionStarted = false;
-
-      if (
-        existing.user_id === user.id &&
-        BigInt(existing.units) === requestedUnits
-      ) {
-        return {
-          status: "duplicate",
-          usage: {
-            requestId: existing.request_id,
-            units: existing.units,
-            createdAt: existing.created_at,
-          },
-        };
+      if (row.user_id !== user.id || BigInt(row.units) !== requested) {
+        return await abort(
+          "conflict",
+          "Request ID already used with different data",
+        );
       }
 
+      await client.query("ROLLBACK");
       return {
-        status: "rejected",
-        reason: "Request ID already used with different data",
+        status: "decided",
+        duplicate: true,
+        decision: toDecision(row),
       };
     }
 
-    const accountRequestLimit = BigInt(account.max_request_units);
-    const userRequestLimit = BigInt(user.max_request_units);
-
-    if (
-      requestedUnits > accountRequestLimit ||
-      requestedUnits > userRequestLimit
-    ) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
-      return { status: "rejected", reason: "Request limit exceeded" };
-    }
-
-    // Calculate usage since the start of the current UTC month.
-    const accountUsageResult = await client.query(
-      `SELECT COALESCE(SUM(units), 0)::text AS used
+    // Usage so far this UTC month: account total and this user's total.
+    const usageResult = await client.query(
+      `SELECT
+         COALESCE(SUM(units), 0)::text AS account_used,
+         COALESCE(SUM(units) FILTER (WHERE user_id = $2), 0)::text AS user_used
        FROM usage_events
        WHERE account_id = $1
-         AND created_at >= (
-           date_trunc('month', NOW() AT TIME ZONE 'UTC')
-           AT TIME ZONE 'UTC'
-         )`,
-      [input.accountId],
-    );
-
-    const userUsageResult = await client.query(
-      `SELECT COALESCE(SUM(units), 0)::text AS used
-       FROM usage_events
-       WHERE account_id = $1
-         AND user_id = $2
          AND created_at >= (
            date_trunc('month', NOW() AT TIME ZONE 'UTC')
            AT TIME ZONE 'UTC'
@@ -157,50 +174,84 @@ export async function consumeUsage(
       [input.accountId, user.id],
     );
 
-    const accountUsed = BigInt(accountUsageResult.rows[0].used);
-    const userUsed = BigInt(userUsageResult.rows[0].used);
-    const accountMonthlyLimit = BigInt(account.monthly_limit);
-    const userMonthlyLimit = BigInt(user.monthly_limit);
+    const accountUsed = BigInt(usageResult.rows[0].account_used);
+    const userUsed = BigInt(usageResult.rows[0].user_used);
+    const accountMonthly = BigInt(account.monthly_limit);
+    const userMonthly = BigInt(user.monthly_limit);
+    const accountMaxRequest = BigInt(account.max_request_units);
+    const userMaxRequest = BigInt(user.max_request_units);
 
-    if (accountUsed + requestedUnits > accountMonthlyLimit) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
-      return {
-        status: "rejected",
-        reason: "Account monthly limit exceeded",
+    // Per-request limits first, then monthly allowances; account before user.
+    let rejection: Rejection | undefined;
+
+    if (requested > accountMaxRequest) {
+      rejection = {
+        level: "account",
+        rule: "max_units_per_request",
+        limit: Number(accountMaxRequest),
+      };
+    } else if (requested > userMaxRequest) {
+      rejection = {
+        level: "user",
+        rule: "max_units_per_request",
+        limit: Number(userMaxRequest),
+      };
+    } else if (accountUsed + requested > accountMonthly) {
+      rejection = {
+        level: "account",
+        rule: "monthly_allowance",
+        limit: Number(accountMonthly),
+      };
+    } else if (userUsed + requested > userMonthly) {
+      rejection = {
+        level: "user",
+        rule: "monthly_allowance",
+        limit: Number(userMonthly),
       };
     }
 
-    if (userUsed + requestedUnits > userMonthlyLimit) {
-      await client.query("ROLLBACK");
-      transactionStarted = false;
-      return {
-        status: "rejected",
-        reason: "User monthly limit exceeded",
-      };
-    }
+    const accepted = rejection === undefined;
+    const counted = accepted ? requested : 0n;
 
-    // Record usage only after all checks pass.
-    const insertResult = await client.query(
-      `INSERT INTO usage_events (
-         account_id, user_id, request_id, units
+    const logResult = await client.query(
+      `INSERT INTO request_log (
+         account_id, user_id, request_id, units, accepted,
+         rejection_level, rejection_rule, rejection_limit,
+         account_remaining, user_remaining
        )
-       VALUES ($1, $2, $3, $4)
-       RETURNING request_id, units::text AS units, created_at`,
-      [input.accountId, user.id, input.requestId.trim(), input.units],
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       RETURNING ${LOG_COLUMNS}`,
+      [
+        input.accountId,
+        user.id,
+        requestId,
+        input.units,
+        accepted,
+        rejection?.level ?? null,
+        rejection?.rule ?? null,
+        rejection?.limit ?? null,
+        remaining(accountMonthly, accountUsed + counted),
+        remaining(userMonthly, userUsed + counted),
+      ],
     );
 
+    if (accepted) {
+      await client.query(
+        `INSERT INTO usage_events (account_id, user_id, request_id, units)
+         VALUES ($1, $2, $3, $4)`,
+        [input.accountId, user.id, requestId, input.units],
+      );
+    }
+
     await client.query("COMMIT");
-    transactionStarted = false;
 
     return {
-      status: "recorded",
-      usage: insertResult.rows[0],
+      status: "decided",
+      duplicate: false,
+      decision: toDecision(logResult.rows[0]),
     };
   } catch (error) {
-    if (transactionStarted) {
-      await client.query("ROLLBACK");
-    }
+    await client.query("ROLLBACK").catch(() => undefined);
     throw error;
   } finally {
     client.release();

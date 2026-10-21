@@ -326,37 +326,22 @@ app.post(
         units,
       });
 
-      if (result.status === "rejected") {
+      if (result.status === "error") {
         const status =
-          result.reason === "User or user plan not found" ||
-          result.reason === "Account or account plan not found"
+          result.code === "not_found"
             ? 404
-            : result.reason === "Request ID already used with different data"
+            : result.code === "conflict"
               ? 409
-              : result.reason === "Invalid usage input"
-                ? 400
-                : 429;
+              : 400;
 
-        res.status(status).json({
-          error: result.reason,
-        });
+        res.status(status).json({ error: result.message });
         return;
       }
 
-      if (result.status === "duplicate") {
-        res.status(200).json({
-          message: "Request was already recorded",
-          duplicate: true,
-          usage: result.usage,
-        });
-        return;
-      }
+      const { decision, duplicate } = result;
+      const status = decision.accepted ? (duplicate ? 200 : 201) : 429;
 
-      res.status(201).json({
-        message: "Usage recorded successfully",
-        duplicate: false,
-        usage: result.usage,
-      });
+      res.status(status).json({ duplicate, ...decision });
     } catch (error) {
       console.error("Failed to record usage:", error);
 

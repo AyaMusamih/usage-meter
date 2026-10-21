@@ -56,3 +56,25 @@ CREATE INDEX IF NOT EXISTS idx_usage_account_created
 
 CREATE INDEX IF NOT EXISTS idx_usage_user_created
     ON usage_events (account_id, user_id, created_at);
+
+-- Every consume decision (accepted or rejected) is logged for retries and history.
+CREATE TABLE IF NOT EXISTS request_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL,
+    request_id TEXT NOT NULL,
+    units BIGINT NOT NULL CHECK (units > 0),
+    accepted BOOLEAN NOT NULL,
+    rejection_level TEXT CHECK (rejection_level IN ('account', 'user')),
+    rejection_rule TEXT CHECK (rejection_rule IN ('max_units_per_request', 'monthly_allowance')),
+    rejection_limit BIGINT,
+    account_remaining BIGINT NOT NULL,
+    user_remaining BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    FOREIGN KEY (account_id, user_id)
+        REFERENCES users(account_id, id),
+    UNIQUE (account_id, request_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_log_account_created
+    ON request_log (account_id, created_at DESC);
