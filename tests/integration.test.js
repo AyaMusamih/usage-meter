@@ -116,6 +116,62 @@ test("usage is recorded once and monthly limits are enforced", async () => {
   }
 });
 
+test("accounts cannot access each other's plans", async () => {
+  const server = app.listen(0);
+
+  try {
+    const address = server.address();
+    const baseUrl = `http://127.0.0.1:${address.port}`;
+
+    async function createAccount(name) {
+      const response = await fetch(`${baseUrl}/accounts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+
+      assert.equal(response.status, 201);
+      return response.json();
+    }
+
+    const first = await createAccount(`Account A ${Date.now()}`);
+    const second = await createAccount(`Account B ${Date.now()}`);
+
+    const firstPath = `${baseUrl}/accounts/${first.account.id}`;
+    const secondPath = `${baseUrl}/accounts/${second.account.id}`;
+
+    const firstHeaders = { "x-api-key": first.apiKey };
+    const secondHeaders = { "x-api-key": second.apiKey };
+
+    // Account B requests its own plans.
+    const ownPlansResponse = await fetch(`${secondPath}/plans`, {
+      headers: secondHeaders,
+    });
+
+    assert.equal(ownPlansResponse.status, 200);
+
+    const { plans } = await ownPlansResponse.json();
+    assert.ok(plans.length > 0);
+
+    // Account A cannot view a plan owned by Account B.
+    const planId = plans[0].id;
+
+    const crossAccountResponse = await fetch(
+      `${firstPath}/plans/${planId}`,
+      { headers: firstHeaders },
+    );
+
+    assert.equal(crossAccountResponse.status, 404);
+  } finally {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  }
+});
+
 // Close the PostgreSQL pool after the test finishes.
 test("close integration test database connection", async () => {
   await pool.end();

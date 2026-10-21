@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS plans (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+ALTER TABLE plans
+    ADD COLUMN IF NOT EXISTS is_predefined BOOLEAN NOT NULL DEFAULT FALSE;
+
 -- Each account has an assigned account-level plan.
 CREATE TABLE IF NOT EXISTS account_plan_assignments (
     account_id UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,

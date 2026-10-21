@@ -5,11 +5,12 @@ import { generateApiKey, hashApiKey } from "./utils/apiKey.js";
 import { authenticateAccount } from "./middleware/authenticateAccount.js";
 import { consumeUsage } from "./services/usageService.js";
 import { getAccountUsageSummary } from "./services/usageSummaryService.js";
+import { plansRouter } from "./routes/plans.js";
 
 const app = express();
 
 app.use(express.json());
-
+app.use("/accounts/:accountId", plansRouter);
 
 app.post("/accounts", async (req, res) => {
   const { name } = req.body;
@@ -69,8 +70,8 @@ app.post("/accounts", async (req, res) => {
     for (const plan of plans) {
       const planResult = await client.query(
         `INSERT INTO plans
-          (owner_account_id, scope, name, monthly_limit, max_request_units)
-         VALUES ($1, $2, $3, $4, $5)
+          (owner_account_id, scope, name, monthly_limit, max_request_units, is_predefined)
+         VALUES ($1, $2, $3, $4, $5, TRUE)
          RETURNING id`,
         [
           account.id,
@@ -109,7 +110,6 @@ app.post("/accounts", async (req, res) => {
     client.release();
   }
 });
-
 
 app.post(
   "/accounts/:accountId/plans",
@@ -161,14 +161,6 @@ app.post(
 
       const plan = planResult.rows[0];
 
-      await pool.query(
-        `INSERT INTO account_plan_assignments (account_id, plan_id)
-         VALUES ($1, $2)
-         ON CONFLICT (account_id)
-         DO UPDATE SET plan_id = EXCLUDED.plan_id`,
-        [accountId, plan.id],
-      );
-
       res.status(201).json({ plan });
     } catch (error) {
       console.error("Failed to create account plan:", error);
@@ -179,7 +171,6 @@ app.post(
     }
   },
 );
-
 
 app.post(
   "/accounts/:accountId/user-plans",
@@ -229,7 +220,6 @@ app.post(
     }
   },
 );
-
 
 app.post(
   "/accounts/:accountId/users",
@@ -299,19 +289,18 @@ app.post(
   },
 );
 
-
 app.post(
   "/accounts/:accountId/usage",
   authenticateAccount,
   async (req, res) => {
     const accountId = req.params.accountId;
 
-if (typeof accountId !== "string") {
-  res.status(400).json({
-    error: "Invalid account ID",
-  });
-  return;
-}
+    if (typeof accountId !== "string") {
+      res.status(400).json({
+        error: "Invalid account ID",
+      });
+      return;
+    }
     const { externalUserId, requestId, units } = req.body;
 
     if (
@@ -323,7 +312,8 @@ if (typeof accountId !== "string") {
       units <= 0
     ) {
       res.status(400).json({
-        error: "External user ID, request ID, and positive integer units are required",
+        error:
+          "External user ID, request ID, and positive integer units are required",
       });
       return;
     }
@@ -377,7 +367,6 @@ if (typeof accountId !== "string") {
   },
 );
 
-
 app.get(
   "/accounts/:accountId/usage/summary",
   authenticateAccount,
@@ -413,7 +402,6 @@ app.get(
     }
   },
 );
-
 
 app.get("/health", async (_req, res) => {
   try {
