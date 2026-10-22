@@ -6,11 +6,13 @@ import { authenticateAccount } from "./middleware/authenticateAccount.js";
 import { consumeUsage } from "./services/usageService.js";
 import { getAccountUsageSummary } from "./services/usageSummaryService.js";
 import { plansRouter } from "./routes/plans.js";
+import { usageRouter } from "./routes/usage.js";
 
 const app = express();
 
 app.use(express.json());
 app.use("/accounts/:accountId", plansRouter);
+app.use("/accounts/:accountId", usageRouter);
 
 app.post("/accounts", async (req, res) => {
   const { name } = req.body;

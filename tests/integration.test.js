@@ -84,20 +84,67 @@ test("usage is recorded once and monthly limits are enforced", async () => {
     assert.equal(duplicateResponse.status, 200);
     assert.equal((await duplicateResponse.json()).duplicate, true);
 
-    // 6. Another 21 units would exceed the monthly limit (40).
+        // 6. Another 21 units would exceed the monthly limit (40).
+    const rejectedPayload = {
+      externalUserId: "integration-user",
+      requestId: "integration-request-2",
+      units: 21,
+    };
+
     const overLimitResponse = await fetch(`${accountPath}/usage`, {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        externalUserId: "integration-user",
-        requestId: "integration-request-2",
-        units: 21,
-      }),
+      body: JSON.stringify(rejectedPayload),
     });
 
     assert.equal(overLimitResponse.status, 429);
 
-    // 7. Confirm only the original 20 units were counted.
+    const rejectedDecision = await overLimitResponse.json();
+    assert.equal(rejectedDecision.duplicate, false);
+    assert.equal(rejectedDecision.accepted, false);
+    assert.deepEqual(rejectedDecision.rejection, {
+      level: "user",
+      rule: "monthly_allowance",
+      limit: 40,
+    });
+
+    // 7. Repeat the rejected request: the saved decision must be returned.
+    const repeatedRejectedResponse = await fetch(`${accountPath}/usage`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(rejectedPayload),
+    });
+
+    assert.equal(repeatedRejectedResponse.status, 429);
+
+    const repeatedDecision = await repeatedRejectedResponse.json();
+    assert.equal(repeatedDecision.duplicate, true);
+    assert.equal(repeatedDecision.accepted, false);
+    assert.deepEqual(repeatedDecision.rejection, rejectedDecision.rejection);
+
+    // 8. Reusing the same request ID with different data must return 409.
+    const conflictingResponse = await fetch(`${accountPath}/usage`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        ...rejectedPayload,
+        units: 10,
+      }),
+    });
+
+    assert.equal(conflictingResponse.status, 409);
+
+    // 9. Confirm the rejected request was logged only once.
+        const logResult = await pool.query(
+      `SELECT COUNT(*)::int AS count
+       FROM request_log
+       WHERE account_id = $1 AND request_id = $2`,
+      [account.id, rejectedPayload.requestId],
+    );
+
+    assert.equal(logResult.rows[0].count, 1);
+
+    // 10. Confirm rejected requests did not increase usage.
     const summaryResponse = await fetch(
       `${accountPath}/usage/summary`,
       { headers },

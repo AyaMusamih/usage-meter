@@ -31,16 +31,14 @@ services:
   client:
     image: node:24-alpine
     working_dir: /app
-    profiles: ["demo"]
     volumes:
       - ./examples:/app:ro
     environment:
       USAGE_METER_BASE_URL: http://api:3000
-      USAGE_METER_API_KEY: ${USAGE_METER_API_KEY:-}
-      USAGE_METER_ACCOUNT_ID: ${USAGE_METER_ACCOUNT_ID:-}
     command: ["node", "usage-demo.mjs"]
     depends_on:
-      - api
+      api:
+        condition: service_started
 
 volumes:
   postgres_data:
