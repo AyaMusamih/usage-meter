@@ -119,8 +119,8 @@ async function main() {
   }
 
   console.log("Account plan: 100 units/month, max 50 per request");
-  console.log("alice: Basic - 60 units/month, max 20 per request");
-  console.log("bob: Premium - 100 units/month, max 50 per request\n");
+  console.log("alice: Demo Basic - 60 units/month, max 20 per request");
+  console.log("bob: Demo Premium - 100 units/month, max 50 per request\n");
 
   let counter = 0;
 
@@ -169,7 +169,7 @@ async function main() {
     25,
     "3. Rejected by the USER per-request limit",
   );
-  await processDocument("bob", 50, "4. Accepted for bob (Premium)");
+  await processDocument("bob", 50, "4. Accepted for bob (Demo Premium)");
 
   await processDocument(
     "bob",
@@ -186,12 +186,12 @@ async function main() {
     "Switch alice to Premium",
   );
 
-  console.log(">>> alice switched from Basic to Premium\n");
+  console.log(">>> alice switched from Demo Basic to Demo Premium\n");
 
   await processDocument(
     "alice",
     25,
-    "6. Same 25-unit request, now accepted",
+    "6. Same 25-unit request, now accepted (alice on Demo Premium)",
   );
 
   const summary = must(

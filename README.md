@@ -13,21 +13,22 @@ docker compose up --build
 This starts PostgreSQL (schema applied automatically), the API on `http://localhost:3000`, and the example client. The client creates its own demo account and prints a walkthrough, then exits. The API and database keep running.
 
 - Health check: `curl http://localhost:3000/health`
+- See the walkthrough again: `docker compose logs client` (useful if you started the stack with `-d`)
 - Re-run the demo: `docker compose run --rm client`
 - Stop: `docker compose down` (data is kept in a Docker volume; `docker compose down -v` deletes it)
 
 ## Example client
 
-`examples/usage-demo.mjs` plays a document-processing app that calls the service with an account API key. It sets up one account (100 units/month, 50 per request) with two users on different plans (alice: Basic 60/month, 20 per request; bob: Premium 100/month, 50 per request) and shows:
+`examples/usage-demo.mjs` plays a document-processing app that calls the service with an account API key. It sets up one account (100 units/month, 50 per request) with two users on custom demo plans: `alice` on `Demo Basic` (60 units/month, 20 per request) and `bob` on `Demo Premium` (100 units/month, 50 per request). These demo plans are separate from the predefined `Basic User` and `Premium User` plans. The example shows:
 
 1. an accepted action
 2. a safe retry (same request ID, not counted twice)
 3. a rejection caused by the **user** limit
-4. an accepted action for bob
+4. an accepted action for `bob`
 5. a rejection caused by the shared **account** limit
-6. alice switched to Premium, and the same request that was rejected in step 3 is now accepted. The client code is unchanged; only the plan changed.
+6. `alice` switched to `Demo Premium`, and a new request of the same size (25 units) that was rejected in step 3 is now accepted. The client code is unchanged; only the plan changed.
 
-Each line shows the decision and the remaining allowance for the account and the user.
+Each line shows the decision and the remaining allowance for the account and the user. The output appears in the terminal running `docker compose up`, or in `docker compose logs client`.
 
 ## Concepts
 
@@ -67,7 +68,7 @@ Accounts can also create their own plans (see the API below), which can be edite
 
 ## API
 
-All endpoints except `/health` and `POST /accounts` need the `x-api-key` header. In the table, `:id` is the account ID.
+All endpoints except `/health` and `POST /accounts` need the `x-api-key` header. In the table, `:id` is the account ID. Account plans and user plans are created through separate endpoints (`/plans` and `/user-plans`) because each plan has a fixed scope.
 
 | Method | Endpoint | Description |
 |---|---|---|
@@ -91,11 +92,13 @@ All endpoints except `/health` and `POST /accounts` need the `x-api-key` header.
 
 ### Consume units
 
+The examples below use the demo account from the example client (account plan 100/month; `alice` on 60/month, 20 per request), so the numbers follow on from each other.
+
 ```bash
 curl -X POST http://localhost:3000/accounts/ACCOUNT_ID/usage \
   -H "Content-Type: application/json" \
   -H "x-api-key: YOUR_API_KEY" \
-  -d '{"externalUserId":"alice","requestId":"doc-001","units":25}'
+  -d '{"externalUserId":"alice","requestId":"doc-001","units":15}'
 ```
 
 Accepted (`201`):
@@ -105,13 +108,13 @@ Accepted (`201`):
   "duplicate": false,
   "accepted": true,
   "requestId": "doc-001",
-  "units": 25,
-  "remaining": { "account": 75, "user": 35 },
+  "units": 15,
+  "remaining": { "account": 85, "user": 45 },
   "createdAt": "2026-10-23T12:00:00.000Z"
 }
 ```
 
-Rejected (`429`) names the rule that prevented the request and who owns it:
+A following request for 25 units (`doc-002`) is rejected (`429`). The response names the rule that prevented it and who owns it:
 
 ```json
 {
@@ -120,18 +123,18 @@ Rejected (`429`) names the rule that prevented the request and who owns it:
   "requestId": "doc-002",
   "units": 25,
   "rejection": { "level": "user", "rule": "max_units_per_request", "limit": 20 },
-  "remaining": { "account": 75, "user": 35 },
+  "remaining": { "account": 85, "user": 45 },
   "createdAt": "2026-10-23T12:00:01.000Z"
 }
 ```
 
-`rule` is `max_units_per_request` or `monthly_allowance`; `level` is `account` or `user`. A rejection consumes nothing.
+`rule` is `max_units_per_request` or `monthly_allowance`; `level` is `account` or `user`. A rejection consumes nothing, so `remaining` is unchanged.
 
 | Status | Meaning |
 |---|---|
-| 201 | Accepted and recorded |
-| 200 | Retry of a request already decided (same decision returned, `duplicate: true`) |
-| 429 | Rejected by a limit (see `rejection`) |
+| 201 | Accepted and recorded for the first time |
+| 200 | Retry of a previously accepted request (`duplicate: true`) |
+| 429 | Rejected by a limit; retries of previously rejected requests also return `429` |
 | 400 | Invalid input |
 | 401 | Missing or invalid API key |
 | 404 | Account, user, or plan not found |
@@ -184,7 +187,9 @@ New usage belongs to the UTC month in which it is processed. Each month starts a
 
 ## Retries (idempotency)
 
-`requestId` is unique per account. If the same `requestId` arrives again with the same user and units, the stored decision is returned (`200`, `duplicate: true`) and nothing is counted twice, whether the original was accepted or rejected. Reusing it with different data returns `409`. This is safe even when retries arrive concurrently.
+`requestId` is unique per account. If the same `requestId` arrives again with the same user and units, the stored decision is returned without counting usage twice. If the original request was accepted, the retry returns `200` with `duplicate: true`. If the original request was rejected, it returns `429` with `duplicate: true`. Reusing the same `requestId` with different data returns `409`. This is safe even when retries arrive concurrently.
+
+A retry returns the decision exactly as it was first made, including the `remaining` values at that moment, not the current ones. To see current remaining allowance, use the usage endpoints.
 
 ## Design
 
@@ -204,6 +209,12 @@ New usage belongs to the UTC month in which it is processed. Each month starts a
 - Users are identified by the caller's own `externalUserId`.
 
 ## Tests
+
+The tests and the performance scripts run on your machine (not in Docker), so you need **Node.js 24** and the dependencies installed first:
+
+```bash
+npm ci
+```
 
 Start the database and create the test database (one-time setup). The database container publishes PostgreSQL on `localhost:5433`, which is where the tests connect by default.
 
@@ -225,9 +236,19 @@ The suite covers input validation, API key checks and account isolation, duplica
 
 ## Performance testing
 
-Two scripts. Results are documented in [`docs/performance-results.md`](docs/performance-results.md).
+Two scripts, both run from the host (see the Tests section for `npm ci`). Full results and analysis are in [`docs/performance-results.md`](docs/performance-results.md).
 
-Concurrent load test against the running stack (start it first with `docker compose up --build`):
+**Summary** (local machine, 5,000 requests, concurrency 50): about 160–217 requests/s when all requests hit one account, because requests for one account run one at a time; about 720 requests/s when the same load is spread over 10 accounts. Stored totals matched the number of accepted requests in every run.
+
+### Concurrent load test
+
+Start the stack first (detached, so the terminal stays free):
+
+```bash
+docker compose up --build -d
+```
+
+Then run the load test:
 
 ```bash
 # 1 account, 5000 requests, concurrency 50 (defaults)
@@ -237,9 +258,21 @@ npm run load
 LOAD_ACCOUNTS=10 npm run load
 ```
 
-Options: `BASE_URL`, `LOAD_REQUESTS`, `LOAD_CONCURRENCY`, `LOAD_ACCOUNTS`, `LOAD_USERS`. The script creates real accounts and data, so do not run it against production. It also checks that stored account and user totals equal the number of accepted requests, and exits with a non-zero code if the check fails or any request fails.
+Options (environment variables) and their defaults:
 
-Sequential baseline against the test database:
+| Variable | Default | Meaning |
+|---|---:|---|
+| `BASE_URL` | `http://localhost:3000` | API to test |
+| `LOAD_REQUESTS` | 5000 | Total requests |
+| `LOAD_CONCURRENCY` | 50 | Parallel clients |
+| `LOAD_ACCOUNTS` | 1 | Accounts the load is spread over |
+| `LOAD_USERS` | 10 | Users per account |
+
+The script creates real accounts and data, so do not run it against production. It also checks that stored account and user totals equal the number of accepted requests, and exits with a non-zero code if the check fails or any request fails.
+
+### Sequential baseline
+
+This script runs the app in the same process against the **test database** (see the Tests section for setup), so the Docker stack does not need to be running. Set `PERF_REQUESTS` to change the request count (default 1000).
 
 ```bash
 npm run build
@@ -249,6 +282,7 @@ node scripts/performance.mjs
 ## Known limitations
 
 - **Per-account throughput is limited by the account lock.** All requests for one account run one at a time, while different accounts run in parallel. A running-counter design would remove most of this limit at the cost of more complex plan-change and month-rollover handling. See `docs/performance-results.md` for measured numbers.
+- **Connection pool is at its default size.** Many requests waiting on one busy account's lock can hold pool connections, which could slow other accounts under extreme load. This was not tested.
 - Monthly usage is summed from events on each request. Behavior at very large event volumes per account has not been tested beyond the load test sizes.
 - Remaining allowance for past months uses current plans (see assumptions).
 - No billing, refunds, multiple resource types, roles, or end-user login (out of scope).
