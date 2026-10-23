@@ -1,61 +1,48 @@
-
 # Usage Meter
 
-A TypeScript REST API for tracking and enforcing monthly usage limits for accounts and their users. It uses Express, PostgreSQL, and Docker Compose.
+A TypeScript/Express/PostgreSQL service that other applications call to track usage and decide whether their users may perform an action. Each account has a shared monthly allowance, and each user has an individual allowance. A request is accepted only if both allow it.
 
-## Features
+## Quick start
 
-- API-key authentication for accounts.
-- Account and user monthly usage limits.
-- Per-request unit limits.
-- Usage recording with request IDs to prevent duplicate consumption.
-- Account monthly usage summary.
-- Account and user plan creation.
-- Persistent PostgreSQL storage.
-- Health check endpoint.
-
-## Requirements
-
-- Docker Desktop with Docker Compose.
-
-## Run with Docker Compose
-
-Build and start the API and database:
+Requires Docker Desktop with Docker Compose.
 
 ```bash
-docker compose up --build -d
+docker compose up --build
 ```
 
-Check the running services:
+This starts PostgreSQL (schema applied automatically), the API on `http://localhost:3000`, and the example client. The client creates its own demo account and prints a walkthrough, then exits. The API and database keep running.
 
-```bash
-docker compose ps
-```
+- Health check: `curl http://localhost:3000/health`
+- Re-run the demo: `docker compose run --rm client`
+- Stop: `docker compose down` (data is kept in a Docker volume; `docker compose down -v` deletes it)
 
-Check API and database health:
+## Example client
 
-```bash
-curl http://localhost:3000/health
-```
+`examples/usage-demo.mjs` plays a document-processing app that calls the service with an account API key. It sets up one account (100 units/month, 50 per request) with two users on different plans (alice: Basic 60/month, 20 per request; bob: Premium 100/month, 50 per request) and shows:
 
-Expected response:
+1. an accepted action
+2. a safe retry (same request ID, not counted twice)
+3. a rejection caused by the **user** limit
+4. an accepted action for bob
+5. a rejection caused by the shared **account** limit
+6. alice switched to Premium, and the same request that was rejected in step 3 is now accepted. The client code is unchanged; only the plan changed.
 
-```json
-{"status":"ok","database":"connected"}
-```
+Each line shows the decision and the remaining allowance for the account and the user.
 
-Stop the services:
+## Concepts
 
-```bash
-docker compose down
-```
+| Concept | Meaning |
+|---|---|
+| Account | An application calling the service. Its plan sets limits shared by all its users. |
+| User | A user of that application, registered under an account (`externalUserId`). Its plan sets individual limits. |
+| Plan | A named set of rules: monthly allowance and maximum units per request. |
+| Units | The single resource that is metered (for example document-processing credits). |
 
-The database uses a named Docker volume. Data remains after stopping the services. Avoid `docker compose down -v` unless you intend to delete the database volume.
+Every request must satisfy **both** the account plan and the user plan. A user with a large plan cannot exceed the account's allowance. Accepted units count against both the user and the account.
 
+## API keys
 
-## Authentication
-
-Create an account:
+`POST /accounts` returns the account ID and an API key. The key is shown **once**; only its hash is stored. Send it in the `x-api-key` header on every other call. A key only works for its own account: another account's key, or a missing or invalid key, gets `401`, and plans or users from another account are never visible.
 
 ```bash
 curl -X POST http://localhost:3000/accounts \
@@ -63,77 +50,94 @@ curl -X POST http://localhost:3000/accounts \
   -d '{"name":"Example App"}'
 ```
 
-The response includes the account ID and a generated API key. Save the key securely because the service stores its hash.
-
-Authenticated requests must include the account's API key in the `x-api-key` header.
-
 Do not commit API keys or `.env` files.
 
-## API Endpoints
+## Predefined plans
+
+Every new account receives these read-only plans (changing them returns `403`). Starter is assigned to the account by default.
+
+| Plan | Scope | Monthly allowance | Max per request |
+|---|---|---:|---:|
+| Starter | account | 100,000 | 1,000 |
+| Pro | account | 200,000 | 2,000 |
+| Basic User | user | 5,000 | 100 |
+| Premium User | user | 20,000 | 500 |
+
+Accounts can also create their own plans (see the API below), which can be edited at any time.
+
+## API
+
+All endpoints except `/health` and `POST /accounts` need the `x-api-key` header. In the table, `:id` is the account ID.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/health` | Check API and database health |
-| POST | `/accounts` | Create an account and default plans |
-| POST | `/accounts/:accountId/plans` | Create and assign an account plan |
-| POST | `/accounts/:accountId/user-plans` | Create a user plan |
-| POST | `/accounts/:accountId/users` | Create a user |
-| POST | `/accounts/:accountId/usage` | Record usage |
-| GET | `/accounts/:accountId/usage/summary` | Get current-month account usage |
+| GET | `/health` | API and database health |
+| POST | `/accounts` | Create an account (returns the API key once) |
+| GET | `/accounts/:id/plans` | List the account's plans (predefined and custom) |
+| GET | `/accounts/:id/plans/:planId` | View one plan |
+| POST | `/accounts/:id/plans` | Create a custom **account** plan |
+| POST | `/accounts/:id/user-plans` | Create a custom **user** plan |
+| PATCH | `/accounts/:id/plans/:planId` | Update a custom plan (`name`, `monthlyLimit`, `maxRequestUnits`) |
+| GET | `/accounts/:id/plan` | The account plan currently applied |
+| PUT | `/accounts/:id/plan` | Assign an account plan: `{"planId": "..."}` |
+| POST | `/accounts/:id/users` | Register a user: `{"externalUserId": "...", "planId": "..."}` |
+| GET | `/accounts/:id/users` | List users and their plans |
+| PUT | `/accounts/:id/users/:externalUserId/plan` | Change a user's plan: `{"planId": "..."}` |
+| POST | `/accounts/:id/usage` | **Consume units** |
+| GET | `/accounts/:id/usage` | Consumed and remaining for the account and all users (optional `?month=YYYY-MM`, default is the current UTC month) |
+| GET | `/accounts/:id/users/:externalUserId/usage` | Same, for one user (optional `?month=YYYY-MM`) |
+| GET | `/accounts/:id/usage/summary` | Current-month account summary |
+| GET | `/accounts/:id/requests` | Request history (accepted and rejected), newest first |
 
-All endpoints except `/health` and account creation require authentication.
-
-## Create a User Plan
-
-```bash
-curl -X POST http://localhost:3000/accounts/ACCOUNT_ID/user-plans \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_API_KEY" \
-  -d '{
-    "name": "Basic User",
-    "monthlyLimit": 5000,
-    "maxRequestUnits": 100
-  }'
-```
-
-Use the returned plan ID to create a user:
-
-```bash
-curl -X POST http://localhost:3000/accounts/ACCOUNT_ID/users \
-  -H "Content-Type: application/json" \
-  -H "x-api-key: YOUR_API_KEY" \
-  -d '{
-    "externalUserId": "user-001",
-    "planId": "USER_PLAN_ID"
-  }'
-```
-
-## Record Usage
+### Consume units
 
 ```bash
 curl -X POST http://localhost:3000/accounts/ACCOUNT_ID/usage \
   -H "Content-Type: application/json" \
   -H "x-api-key: YOUR_API_KEY" \
-  -d '{
-    "externalUserId": "user-001",
-    "requestId": "request-001",
-    "units": 25
-  }'
+  -d '{"externalUserId":"alice","requestId":"doc-001","units":25}'
 ```
 
-Each request requires an external user ID, a request ID, and a positive integer number of units.
+Accepted (`201`):
 
-- `201 Created`: usage was recorded.
-- `200 OK`: the same request was already recorded.
-- `400 Bad Request`: invalid input.
-- `401 Unauthorized`: missing or invalid API key.
-- `404 Not Found`: account, user, or plan not found.
-- `409 Conflict`: request ID reused with different data.
-- `429 Too Many Requests`: a usage limit was exceeded.
+```json
+{
+  "duplicate": false,
+  "accepted": true,
+  "requestId": "doc-001",
+  "units": 25,
+  "remaining": { "account": 75, "user": 35 },
+  "createdAt": "2026-10-23T12:00:00.000Z"
+}
+```
 
-Rejected requests do not consume usage. Repeating a request with the same request ID and payload does not count the usage twice.
+Rejected (`429`) names the rule that prevented the request and who owns it:
 
-## Usage Summary
+```json
+{
+  "duplicate": false,
+  "accepted": false,
+  "requestId": "doc-002",
+  "units": 25,
+  "rejection": { "level": "user", "rule": "max_units_per_request", "limit": 20 },
+  "remaining": { "account": 75, "user": 35 },
+  "createdAt": "2026-10-23T12:00:01.000Z"
+}
+```
+
+`rule` is `max_units_per_request` or `monthly_allowance`; `level` is `account` or `user`. A rejection consumes nothing.
+
+| Status | Meaning |
+|---|---|
+| 201 | Accepted and recorded |
+| 200 | Retry of a request already decided (same decision returned, `duplicate: true`) |
+| 429 | Rejected by a limit (see `rejection`) |
+| 400 | Invalid input |
+| 401 | Missing or invalid API key |
+| 404 | Account, user, or plan not found |
+| 409 | Request ID reused with different user or units |
+
+### Usage summary
 
 ```bash
 curl http://localhost:3000/accounts/ACCOUNT_ID/usage/summary \
@@ -142,57 +146,110 @@ curl http://localhost:3000/accounts/ACCOUNT_ID/usage/summary \
 
 The response reports the current UTC month, accepted usage, monthly limit, remaining units, and usage percentage.
 
-## Usage Rules
+### Request history
 
-- Monthly periods follow UTC calendar months.
-- Both account and user limits must be satisfied.
-- Per-request unit limits are enforced.
-- Usage events are stored in PostgreSQL.
+```bash
+curl "http://localhost:3000/accounts/ACCOUNT_ID/requests?limit=20&offset=0&month=2026-10&externalUserId=alice" \
+  -H "x-api-key: YOUR_API_KEY"
+```
 
-## Testing
+All query parameters are optional.
 
-Run the automated test suite:
+| Parameter | Description |
+|---|---|
+| `limit` | Page size, 1-100 (default 20) |
+| `offset` | Number of records to skip (default 0) |
+| `month` | UTC month, formatted like `2026-10` |
+| `externalUserId` | Only requests from this user |
+
+The response contains `total` (number of matching records), `limit`, `offset`, and a `requests` array. Rejected requests include a `rejection` object. Invalid parameters return `400`.
+
+## Rules and how they combine
+
+Two rule types exist, on both account and user plans: **monthly allowance** (per UTC calendar month) and **maximum units per request**. Checks run in this order and the first failure is reported:
+
+1. account max per request
+2. user max per request
+3. account monthly allowance
+4. user monthly allowance
+
+New usage belongs to the UTC month in which it is processed. Each month starts at zero for the account and every user; earlier months stay queryable.
+
+## Plan changes
+
+- Changes apply to **new** requests as soon as the update succeeds. Editing a custom plan affects every account or user assigned to it.
+- Switching a plan keeps units already consumed this month; it does not grant a fresh allowance.
+- If an allowance is lowered below existing usage, remaining shows `0` and further consumption at that level is rejected until allowance is available again.
+- Request history is never rewritten. Each stored decision keeps the outcome it had at the time.
+
+## Retries (idempotency)
+
+`requestId` is unique per account. If the same `requestId` arrives again with the same user and units, the stored decision is returned (`200`, `duplicate: true`) and nothing is counted twice, whether the original was accepted or rejected. Reusing it with different data returns `409`. This is safe even when retries arrive concurrently.
+
+## Design
+
+- **Schema** (`db/schema.sql`): `accounts`, `plans`, `account_plan_assignments`, `users`, `usage_events` (accepted units only), and `request_log` (every decision). `usage_events` and `request_log` both have `UNIQUE (account_id, request_id)`. Composite foreign keys ensure a user can only appear under its own account.
+- **Usage is derived, not stored as a counter.** Monthly totals are `SUM(units)` over `usage_events` for the UTC month. This keeps plan switches and month rollovers simple: there is no counter to reset or migrate.
+- **Consume path** (`src/services/usageService.ts`): one transaction that locks the account row (`SELECT ... FOR UPDATE`) and the user row, loads both plans, checks for a prior decision with the same request ID, computes usage, applies the rules, then writes `request_log` and, if accepted, `usage_events`. The account lock serialises requests per account, so concurrent requests cannot overspend, while different accounts proceed in parallel.
+- **API keys** are random, shown once, and stored hashed.
+
+## Product assumptions
+
+- One metered resource ("units"). Units are positive integers.
+- Months are UTC calendar months.
+- A rejected request is still logged, so retries get the same answer and history shows rejections.
+- Predefined plans are copied into each account at creation and are read-only; custom plans are per account and can be shared by many users with separate usage.
+- Plan changes apply only to future requests. For a past month, "remaining" is measured against the plans applied *now*, not the plans in force at the time.
+- Rejections use HTTP `429`; the response body, not just the status, says why.
+- Users are identified by the caller's own `externalUserId`.
+
+## Tests
+
+Start the database and create the test database (one-time setup). The database container publishes PostgreSQL on `localhost:5433`, which is where the tests connect by default.
+
+```bash
+docker compose up -d db
+docker compose exec db psql -U usage_app -d usage_meter -c "CREATE DATABASE usage_meter_test;"
+docker compose exec -T db psql -U usage_app -d usage_meter_test < db/schema.sql
+```
+
+Run the suite (this builds the project first):
 
 ```bash
 npm test
 ```
 
-The suite includes API validation tests, authentication tests, usage input validation tests, and a PostgreSQL integration test covering usage recording, duplicate request handling, and monthly limit enforcement.
+To use a different database, set `TEST_DATABASE_URL`.
 
-The integration test uses a separate `usage_meter_test` database. Ensure that this database exists and has been initialized with `db/schema.sql` before running the integration tests.
+The suite covers input validation, API key checks and account isolation, duplicate and retry handling, monthly limit enforcement, usage and history endpoints (including previous months and pagination), and concurrency: 60 parallel requests against a 100-unit allowance accept exactly 20, and ten parallel retries of one request ID count once.
 
-## Performance Testing
+## Performance testing
 
-Build the application and run the sequential performance test:
+Two scripts. Results are documented in [`docs/performance-results.md`](docs/performance-results.md).
+
+Concurrent load test against the running stack (start it first with `docker compose up --build`):
+
+```bash
+# 1 account, 5000 requests, concurrency 50 (defaults)
+npm run load
+
+# the same load spread over 10 accounts
+LOAD_ACCOUNTS=10 npm run load
+```
+
+Options: `BASE_URL`, `LOAD_REQUESTS`, `LOAD_CONCURRENCY`, `LOAD_ACCOUNTS`, `LOAD_USERS`. The script creates real accounts and data, so do not run it against production. It also checks that stored account and user totals equal the number of accepted requests, and exits with a non-zero code if the check fails or any request fails.
+
+Sequential baseline against the test database:
 
 ```bash
 npm run build
 node scripts/performance.mjs
 ```
 
-The test uses the `usage_meter_test` database by default and sends 1,000 sequential usage requests. You can change the request count using `PERF_REQUESTS`, for example:
+## Known limitations
 
-```bash
-PERF_REQUESTS=500 node scripts/performance.mjs
-```
-
-The script reports successful and failed requests, throughput, average latency, and P95 latency.
-
-The initial local run processed 1,000 requests with 100% success, 188.29 requests/second, 5.31 ms average latency, and 7.85 ms P95 latency. These are baseline results from a sequential local test, not a production capacity guarantee.
-
-Detailed results are documented in [`docs/performance-results.md`](docs/performance-results.md).
-
-## Limitations
-
-- Dedicated endpoints for listing and updating plans are not implemented.
-- Changing an existing user's plan through a dedicated endpoint is not implemented.
-- Historical usage reports, request outcome history, and pagination are not implemented.
-- Performance testing currently covers sequential requests; concurrent-load and sustained-load testing remain to be done.
-- The example client is available through the optional Docker Compose `demo` profile. It requires a valid account ID, API key, and an existing user configured for the demo.
-
-## Technology
-
-- TypeScript and Node.js
-- Express
-- PostgreSQL
-- Docker Compose
+- **Per-account throughput is limited by the account lock.** All requests for one account run one at a time, while different accounts run in parallel. A running-counter design would remove most of this limit at the cost of more complex plan-change and month-rollover handling. See `docs/performance-results.md` for measured numbers.
+- Monthly usage is summed from events on each request. Behavior at very large event volumes per account has not been tested beyond the load test sizes.
+- Remaining allowance for past months uses current plans (see assumptions).
+- No billing, refunds, multiple resource types, roles, or end-user login (out of scope).
+- Example credentials in `compose.yaml` are for local development only.
